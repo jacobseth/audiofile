@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"io"
+	"math"
 	"time"
 
 	"github.com/ebitengine/oto/v3"
@@ -14,7 +16,7 @@ func main() {
 		bitDepthInBytes = 2 // 16-bit PCM
 		duration        = 3 * time.Second
 
-		clockFreq = 10.0
+		clockFreq = 300.0
 		dataFreq  = 20
 		amplitude = 16000
 	)
@@ -36,25 +38,44 @@ func main() {
 		defer w.Close()
 
 		totalSamples := int(sampleRate * int(duration.Seconds()))
-		clockHalfPeriod := int(float64(sampleRate) / clockFreq / 2)
-		dataHalfPeriod := sampleRate / dataFreq / 2
-
-		clockVal := int16(amplitude)
-		dataVal := int16(amplitude)
-
 		buf := make([]byte, 2)
 
-		for i := 0; i < totalSamples; i++ {
-			if i%clockHalfPeriod == 0 {
-				clockVal = -clockVal
-			}
-			if i%dataHalfPeriod == 0 {
-				dataVal = -dataVal
+		var period int
+		period = sampleRate / clockFreq
+		halfPeriod := period / 2
+		quarterPeriod := period / 4
+
+		isFirstQuarter := true
+		for i := range totalSamples {
+			i = i + 1
+			t := i % period
+			ht := t % halfPeriod
+
+			isFirstQuarter = !((t % halfPeriod) > quarterPeriod)
+			var qt float64
+
+			if isFirstQuarter {
+				qt = float64(quarterPeriod - ht)
+			} else {
+				qt = float64(ht - quarterPeriod)
 			}
 
-			sample := clockVal/2 + dataVal/2
-			buf[0] = byte(sample)
-			buf[1] = byte(sample >> 8)
+			isFirstHalf := t < (period / 2)
+			tScaled := amplitude / (float64(quarterPeriod) / float64(qt))
+
+			var data int
+			c := math.Pow(float64(amplitude), 2)
+			a := math.Pow(float64(tScaled), 2)
+			if isFirstHalf {
+				data = int(math.Sqrt(c - a))
+			} else {
+				data = int(-math.Sqrt(c - a))
+			}
+
+			fmt.Printf("isFirstQuarter:%v, tmodquarrt:%v,  tmodhalf:%v, p:%v, quarterPeriod:%v, qt:%v,  t:%v data:%v c:%v, tScaled:%v\n", isFirstQuarter, (t % quarterPeriod), (t % halfPeriod), period, quarterPeriod, qt, t, data, c, tScaled)
+
+			buf[0] = byte(data)
+			buf[1] = byte(data >> 8)
 
 			if _, err := w.Write(buf); err != nil {
 				return // Pipe closed or error
