@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
-	"io"
 	"math"
 	"time"
 
+	"math/cmplx"
+	"sort"
+
 	"github.com/ebitengine/oto/v3"
+
+	"gonum.org/v1/gonum/dsp/fourier"
 )
 
 func main() {
@@ -14,10 +19,10 @@ func main() {
 		sampleRate      = 44100
 		channelCount    = 1
 		bitDepthInBytes = 2 // 16-bit PCM
-		duration        = 3 * time.Second
+		duration        = 10 * time.Second
 
-		clockFreq = 300.0
-		dataFreq  = 20
+		clockFreq = 697.0
+		dataFreq  = 1209
 		amplitude = 16000
 	)
 
@@ -32,59 +37,65 @@ func main() {
 	}
 	<-ready
 
-	r, w := io.Pipe()
+	tone := []float64{}
+	totalSamples := int(sampleRate * int(duration.Seconds()))
+	buf := make([]byte, totalSamples*2)
 
-	go func() {
-		defer w.Close()
+	for i := range totalSamples {
+		t := float64(i) / float64(sampleRate) // time in seconds
+		data := amplitude * math.Sin(2*math.Pi*clockFreq*t)
+		data2 := amplitude * math.Sin(2*math.Pi*dataFreq*t)
 
-		totalSamples := int(sampleRate * int(duration.Seconds()))
-		buf := make([]byte, 2)
+		tone = append(tone, data/2+data2/2)
 
-		var period int
-		period = sampleRate / clockFreq
-		halfPeriod := period / 2
-		quarterPeriod := period / 4
+		d := int16(data/2 + data2/2)
+		buf[2*i] = byte(d)
+		buf[2*i+1] = byte(d >> 8)
+	}
 
-		isFirstQuarter := true
-		for i := range totalSamples {
-			i = i + 1
-			t := i % period
-			ht := t % halfPeriod
-
-			isFirstQuarter = !((t % halfPeriod) > quarterPeriod)
-			var qt float64
-
-			if isFirstQuarter {
-				qt = float64(quarterPeriod - ht)
-			} else {
-				qt = float64(ht - quarterPeriod)
-			}
-
-			isFirstHalf := t < (period / 2)
-			tScaled := amplitude / (float64(quarterPeriod) / float64(qt))
-
-			var data int
-			c := math.Pow(float64(amplitude), 2)
-			a := math.Pow(float64(tScaled), 2)
-			if isFirstHalf {
-				data = int(math.Sqrt(c - a))
-			} else {
-				data = int(-math.Sqrt(c - a))
-			}
-
-			fmt.Printf("isFirstQuarter:%v, tmodquarrt:%v,  tmodhalf:%v, p:%v, quarterPeriod:%v, qt:%v,  t:%v data:%v c:%v, tScaled:%v\n", isFirstQuarter, (t % quarterPeriod), (t % halfPeriod), period, quarterPeriod, qt, t, data, c, tScaled)
-
-			buf[0] = byte(data)
-			buf[1] = byte(data >> 8)
-
-			if _, err := w.Write(buf); err != nil {
-				return // Pipe closed or error
-			}
-		}
-	}()
-
-	player := ctx.NewPlayer(r)
+	player := ctx.NewPlayer(bytes.NewReader(buf))
 	player.Play()
+	time.Sleep(4 * time.Second)
 
-	time.Sleep(duration + 100*time.Millisecond)
+	samples := sampleRate
+	fft := fourier.NewFFT(samples)
+	tone = tone[:samples]
+	coeff := fft.Coefficients(nil, tone)
+
+	type freqMag struct {
+		freq float64
+		mag  float64
+	}
+
+	var mags []freqMag
+	var total float64
+	for i, c := range coeff[:samples/2] { // only look at positive freqs
+		m := cmplx.Abs(c)
+		total += m
+		mags = append(mags, freqMag{
+			freq: float64(i) * float64(sampleRate) / float64(samples),
+			mag:  m,
+		})
+	}
+	mean := total / float64(samples/2)
+
+	// Filter to significant frequencies
+	const thresholdFactor = 10.0
+	var result []freqMag
+	for _, fm := range mags {
+		if fm.mag > mean*thresholdFactor {
+			result = append(result, fm)
+		}
+	}
+
+	// Sort by magnitude, descending
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].mag > result[j].mag
+	})
+
+	fmt.Println("Significant frequencies:")
+	for _, r := range result {
+		fmt.Printf("freq = %.1f Hz, mag = %.1f\n", r.freq, r.mag)
+	}
+	// 697 1209
 }
